@@ -1,12 +1,16 @@
 package qowyn.ark.tools.data;
 
-import static qowyn.ark.tools.CommonFunctions.*;
+import static qowyn.ark.tools.CommonFunctions.isCreature;
+import static qowyn.ark.tools.CommonFunctions.isDroppedItem;
+import static qowyn.ark.tools.CommonFunctions.isInventory;
+import static qowyn.ark.tools.CommonFunctions.isPlayer;
+import static qowyn.ark.tools.CommonFunctions.isWeapon;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.DirectoryStream.Filter;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.DirectoryStream.Filter;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -33,202 +37,209 @@ import qowyn.ark.types.ArkName;
 
 public class DataCollector implements DataContext {
 
-  private static final Pattern PROFILE_PATTERN = Pattern.compile("(\\d+|LocalPlayer)\\.arkprofile");
+	private static final Pattern PROFILE_PATTERN = Pattern.compile("(\\d+|LocalPlayer)\\.arkprofile");
 
-  private static final Pattern TRIBE_PATTERN = Pattern.compile("\\d+\\.arktribe");
+	private static final Pattern TRIBE_PATTERN = Pattern.compile("\\d+\\.arktribe");
 
-  public final Map<ArkName, Integer> nameObjectMap = new HashMap<>();
+	public final Map<ArkName, Integer> nameObjectMap = new HashMap<>();
 
-  public final SortedMap<Integer, Item> itemMap = new TreeMap<>();
+	public final SortedMap<Integer, Item> itemMap = new TreeMap<>();
 
-  public final SortedMap<Integer, DroppedItem> droppedItemMap = new TreeMap<>();
+	public final SortedMap<Integer, DroppedItem> droppedItemMap = new TreeMap<>();
 
-  public final SortedMap<Integer, Inventory> inventoryMap = new TreeMap<>();
+	public final SortedMap<Integer, Inventory> inventoryMap = new TreeMap<>();
 
-  public final SortedMap<Integer, Creature> creatureMap = new TreeMap<>();
+	public final SortedMap<Integer, Creature> creatureMap = new TreeMap<>();
 
-  public final SortedMap<Integer, Structure> structureMap = new TreeMap<>();
+	public final SortedMap<Integer, Structure> structureMap = new TreeMap<>();
 
-  public final SortedMap<Long, Player> playerMap;
+	public final SortedMap<Long, Player> playerMap;
 
-  public final SortedMap<Long, ClusterStorage> playerClusterMap;
+	public final SortedMap<Long, ClusterStorage> playerClusterMap;
 
-  public final SortedMap<Integer, Tribe> tribeMap;
+	public final SortedMap<Integer, Tribe> tribeMap;
 
-  public final OptionHandler oh;
+	public final OptionHandler oh;
 
-  public ArkSavegame savegame;
+	public ArkSavegame savegame;
 
-  public GameObjectContainer container;
+	public GameObjectContainer container;
 
-  public LatLonCalculator latLonCalculator;
+	public LatLonCalculator latLonCalculator;
 
-  public long maxAge;
+	public long maxAge;
 
-  private final List<Callable<Object>> tasks;
+	private final List<Callable<Object>> tasks;
 
-  public DataCollector(OptionHandler oh) {
-    this.oh = oh;
+	public DataCollector(OptionHandler oh) {
+		this.oh = oh;
 
-    if (!oh.useParallel()) {
-      tasks = null;
-      playerMap = new TreeMap<>();
-      playerClusterMap = new TreeMap<>();
-      tribeMap = new TreeMap<>();
-    } else {
-      tasks = new ArrayList<>();
-      playerMap = new ConcurrentSkipListMap<>();
-      playerClusterMap = new ConcurrentSkipListMap<>();
-      tribeMap = new ConcurrentSkipListMap<>();
-    }
-  }
+		if (!oh.useParallel()) {
+			tasks = null;
+			playerMap = new TreeMap<>();
+			playerClusterMap = new TreeMap<>();
+			tribeMap = new TreeMap<>();
+		} else {
+			tasks = new ArrayList<>();
+			playerMap = new ConcurrentSkipListMap<>();
+			playerClusterMap = new ConcurrentSkipListMap<>();
+			tribeMap = new ConcurrentSkipListMap<>();
+		}
+	}
 
-  public void loadSavegame(Path path) throws IOException {
-    savegame = new ArkSavegame(path, oh.readingOptions().withObjectFilter(obj -> {
-      // Skip things like NPCZoneVolume and non-instanced objects
-      return !obj.isFromDataFile() && (obj.getNames().size() > 1 || obj.getNames().get(0).getInstance() > 0);
-    }).buildComponentTree(true));
-    latLonCalculator = LatLonCalculator.forSave(savegame);
+	public void loadSavegame(Path path) throws IOException {
+		savegame = new ArkSavegame(path, oh.readingOptions().withObjectFilter(obj -> {
+			// Skip things like NPCZoneVolume and non-instanced objects
+			return !obj.isFromDataFile() && (obj.getNames().size() > 1 || obj.getNames().get(0).getInstance() > 0);
+		}).buildComponentTree(true));
+		latLonCalculator = LatLonCalculator.forSave(savegame);
 
-    if (!savegame.getHibernationEntries().isEmpty()) {
-      List<GameObject> combinedObjects = new ArrayList<>(savegame.getObjects());
+		if (!savegame.getHibernationEntries().isEmpty()) {
+			List<GameObject> combinedObjects = new ArrayList<>(savegame.getObjects());
 
-      for (HibernationEntry entry: savegame.getHibernationEntries()) {
-        ObjectCollector collector = new ObjectCollector(entry, 1);
-        combinedObjects.addAll(collector.remap(combinedObjects.size()));
-      }
+			for (HibernationEntry entry : savegame.getHibernationEntries()) {
+				ObjectCollector collector = new ObjectCollector(entry, 1);
+				combinedObjects.addAll(collector.remap(combinedObjects.size()));
+			}
 
-      container = new GameObjectList(combinedObjects);
-    } else {
-      container = savegame;
-    }
+			container = new GameObjectList(combinedObjects);
+		} else {
+			container = savegame;
+		}
 
-    for (GameObject object: container) {
-      if (object.isFromDataFile() || (object.getNames().size() == 1 && object.getNames().get(0).getInstance() == 0)) {
-        // Skip things like NPCZoneVolume and non-instanced objects
-      } else if (isInventory(object)) {
-        inventoryMap.put(object.getId(), new Inventory(object));
-      } else {
-        if (!nameObjectMap.containsKey(object.getNames().get(0))) {
-          nameObjectMap.put(object.getNames().get(0), object.getId());
-          if (object.isItem()) {
-            itemMap.put(object.getId(), new Item(object));
-          } else if (isCreature(object)) {
-            creatureMap.put(object.getId(), new Creature(object, savegame));
-          } else if (object.getLocation() != null && !isPlayer(object) && !isDroppedItem(object) && !isWeapon(object)) {
-            // Skip players, weapons and items on the ground
-            // is (probably) a structure
-            structureMap.put(object.getId(), new Structure(object, savegame));
-          } else if (isDroppedItem(object)) {
-            // dropped Item
-            droppedItemMap.put(object.getId(), new DroppedItem(object, savegame));
-          }
-        }
-      }
-    }
-  }
+		inventoryMap.clear();
+		nameObjectMap.clear();
+		itemMap.clear();
+		creatureMap.clear();
+		structureMap.clear();
+		droppedItemMap.clear();
 
-  public void loadPlayers(Path path) throws IOException {
-    Filter<Path> profileFilter = p -> PROFILE_PATTERN.matcher(p.getFileName().toString()).matches();
+		for (GameObject object : container) {
+			if (object.isFromDataFile() || (object.getNames().size() == 1 && object.getNames().get(0).getInstance() == 0)) {
+				// Skip things like NPCZoneVolume and non-instanced objects
+			} else if (isInventory(object)) {
+				inventoryMap.put(object.getId(), new Inventory(object));
+			} else {
+				if (!nameObjectMap.containsKey(object.getNames().get(0))) {
+					nameObjectMap.put(object.getNames().get(0), object.getId());
+					if (object.isItem()) {
+						itemMap.put(object.getId(), new Item(object));
+					} else if (isCreature(object)) {
+						creatureMap.put(object.getId(), new Creature(object, savegame));
+					} else if (object.getLocation() != null && !isPlayer(object) && !isDroppedItem(object) && !isWeapon(object)) {
+						// Skip players, weapons and items on the ground
+						// is (probably) a structure
+						structureMap.put(object.getId(), new Structure(object, savegame));
+					} else if (isDroppedItem(object)) {
+						// dropped Item
+						droppedItemMap.put(object.getId(), new DroppedItem(object, savegame));
+					}
+				}
+			}
+		}
+	}
 
-    try (DirectoryStream<Path> stream = Files.newDirectoryStream(path, profileFilter)) {
-      for (Path profilePath : stream) {
-        if (maxAge != 0) {
-          FileTime fileTime = Files.getLastModifiedTime(profilePath);
+	public void loadPlayers(Path path) throws IOException {
+		Filter<Path> profileFilter = p -> PROFILE_PATTERN.matcher(p.getFileName().toString()).matches();
 
-          if (fileTime.toInstant().isBefore(Instant.now().minusSeconds(maxAge))) {
-            continue;
-          }
-        }
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(path, profileFilter)) {
+			for (Path profilePath : stream) {
+				if (maxAge != 0) {
+					FileTime fileTime = Files.getLastModifiedTime(profilePath);
 
-        if (tasks != null) {
-          tasks.add(Executors.callable(() -> loadPlayer(profilePath)));
-        } else {
-          loadPlayer(profilePath);
-        }
-      }
-    }
-  }
+					if (fileTime.toInstant().isBefore(Instant.now().minusSeconds(maxAge))) {
+						continue;
+					}
+				}
 
-  protected void loadPlayer(Path profilePath) {
-    try {
-      Player player = new Player(profilePath, this, oh.readingOptions());
-      playerMap.put(player.playerDataId, player);
-    } catch (RuntimeException ex) {
-      System.err.println("Found potentially corrupt ArkProfile: " + profilePath.toString());
-      if (oh.isVerbose()) {
-        ex.printStackTrace();
-      }
-    } catch (IOException ex) {
-      if (oh.isVerbose()) {
-        ex.printStackTrace();
-      }
-    }
-  }
+				if (tasks != null) {
+					tasks.add(Executors.callable(() -> loadPlayer(profilePath)));
+				} else {
+					loadPlayer(profilePath);
+				}
+			}
+		}
+	}
 
-  public void loadTribes(Path path) throws IOException {
-    Filter<Path> tribeFilter = p -> TRIBE_PATTERN.matcher(p.getFileName().toString()).matches();
+	protected void loadPlayer(Path profilePath) {
+		try {
+			Player player = new Player(profilePath, this, oh.readingOptions());
+			playerMap.put(player.playerDataId, player);
+		} catch (RuntimeException ex) {
+			System.err.println("Found potentially corrupt ArkProfile: " + profilePath.toString());
+			if (oh.isVerbose()) {
+				ex.printStackTrace();
+			}
+		} catch (IOException ex) {
+			if (oh.isVerbose()) {
+				ex.printStackTrace();
+			}
+		}
+	}
 
-    try (DirectoryStream<Path> stream = Files.newDirectoryStream(path, tribeFilter)) {
-      for (Path tribePath : stream) {
-        if (maxAge != 0) {
-          FileTime fileTime = Files.getLastModifiedTime(tribePath);
+	public void loadTribes(Path path) throws IOException {
+		Filter<Path> tribeFilter = p -> TRIBE_PATTERN.matcher(p.getFileName().toString()).matches();
 
-          if (fileTime.toInstant().isBefore(Instant.now().minusSeconds(maxAge))) {
-            continue;
-          }
-        }
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(path, tribeFilter)) {
+			for (Path tribePath : stream) {
+				if (maxAge != 0) {
+					FileTime fileTime = Files.getLastModifiedTime(tribePath);
 
-        if (tasks != null) {
-          tasks.add(Executors.callable(() -> loadTribe(tribePath)));
-        } else {
-          loadTribe(tribePath);
-        }
-      }
-    }
-  }
+					if (fileTime.toInstant().isBefore(Instant.now().minusSeconds(maxAge))) {
+						continue;
+					}
+				}
 
-  protected void loadTribe(Path tribePath) {
-    try {
-      Tribe tribe = new Tribe(tribePath, oh.readingOptions());
-      tribeMap.put(tribe.tribeId, tribe);
-    } catch (RuntimeException ex) {
-      System.err.println("Found potentially corrupt ArkTribe: " + tribePath.toString());
-      if (oh.isVerbose()) {
-        ex.printStackTrace();
-      }
-    } catch (IOException ex) {
-      if (oh.isVerbose()) {
-        ex.printStackTrace();
-      }
-    }
-  }
+				if (tasks != null) {
+					tasks.add(Executors.callable(() -> loadTribe(tribePath)));
+				} else {
+					loadTribe(tribePath);
+				}
+			}
+		}
+	}
 
-  public void loadCluster(Path path) {
-  }
+	protected void loadTribe(Path tribePath) {
+		try {
+			Tribe tribe = new Tribe(tribePath, oh.readingOptions());
+			tribeMap.put(tribe.tribeId, tribe);
+		} catch (RuntimeException ex) {
+			System.err.println("Found potentially corrupt ArkTribe: " + tribePath.toString());
+			if (oh.isVerbose()) {
+				ex.printStackTrace();
+			}
+		} catch (IOException ex) {
+			if (oh.isVerbose()) {
+				ex.printStackTrace();
+			}
+		}
+	}
 
-  public void waitForData() {
-    if (tasks != null) {
-      ForkJoinPool pool = new ForkJoinPool(oh.threadCount(), ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true);
-      pool.invokeAll(tasks);
-      pool.shutdown();
-      tasks.clear();
-    }
-  }
+	public void loadCluster(Path path) {
+	}
 
-  @Override
-  public LatLonCalculator getLatLonCalculator() {
-    return latLonCalculator;
-  }
+	public void waitForData() {
+		if (tasks != null) {
+			ForkJoinPool pool = new ForkJoinPool(oh.threadCount(), ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true);
+			pool.invokeAll(tasks);
+			pool.shutdown();
+			tasks.clear();
+		}
+	}
 
-  @Override
-  public GameObjectContainer getObjectContainer() {
-    return container;
-  }
+	@Override
+	public LatLonCalculator getLatLonCalculator() {
+		return latLonCalculator;
+	}
 
-  @Override
-  public ArkSavegame getSavegame() {
-    return savegame;
-  }
+	@Override
+	public GameObjectContainer getObjectContainer() {
+		return container;
+	}
+
+	@Override
+	public ArkSavegame getSavegame() {
+		return savegame;
+	}
 
 }
